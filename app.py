@@ -1,283 +1,309 @@
+# app.py
+# G検定クイズアプリ（オンライン=Gemini / オフライン=問題バンク）
+# 依存: streamlit, google-generativeai, requests
 import os
+import json
 import random
+from pathlib import Path
 import streamlit as st
-import google.generativeai as genai
-from pypdf import PdfReader
 
-# ======================
-# 基本設定
-# ======================
-st.set_page_config(page_title="G検定クイズアプリ（Gemini版）", layout="wide")
+# ====== 基本設定 ======
+st.set_page_config(page_title="G検定クイズアプリ", page_icon="🧠", layout="centered")
 
-PDF_PATH = "data/JDLA_Gtest_Syllabus_2024_v1.3_JP.pdf"
+APP_DIR = Path(__file__).parent
+DATA_DIR = APP_DIR / "data"
+BANK_DIR = APP_DIR / "problem_bank"
+BANK_FILE = BANK_DIR / "question_bank.jsonl"  # 1行1問のJSON Lines
 
-# Gemini APIキー
-GEMINI_KEY = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
-if not GEMINI_KEY:
-    st.error("Gemini APIキー（GEMINI_API_KEY）が見つかりません。Streamlit Secrets か環境変数に設定してください。")
-    st.stop()
-genai.configure(api_key=GEMINI_KEY)
+# ====== ユーティリティ ======
+def read_jsonl(path: Path):
+    items = []
+    if path.exists():
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    items.append(json.loads(line))
+                except Exception:
+                    # 壊れた行は無視
+                    continue
+    return items
 
-# ======================
-# ユーティリティ
-# ======================
-def load_pdf_text(path: str) -> str:
-    try:
-        r = PdfReader(path)
-        texts = []
-        for p in r.pages:
-            t = p.extract_text() or ""
-            texts.append(t)
-        return "\n".join(texts)
-    except Exception as e:
-        st.error(f"PDFの読み込みに失敗しました: {e}")
-        return ""
+def load_offline_bank():
+    bank = read_jsonl(BANK_FILE)
+    if bank:
+        return bank
 
-def small_truncate(s: str, limit: int = 4000) -> str:
-    return s if len(s) <= limit else s[:limit]
-
-OFFLINE_BANK = [
-    {
-        "q": "教師あり学習の説明として最も適切なのはどれ？",
-        "choices": ["入力と正解ラベルを用いて学習する", "正解ラベルなしで構造を見つける", "報酬最大化の行動を学習する", "テキスト生成のみを扱う学習法"],
-        "ans": "A",
-        "exp": {
-            "A": "教師あり学習は入力と正解ラベルの組で学習する。",
-            "B": "これは教師なし学習の説明。",
-            "C": "これは強化学習の説明。",
-            "D": "学習法の分類ではない。"
+    # バンクが空でも最低限のデフォルト問題（オフライン）
+    return [
+        {
+            "source": "offline_default",
+            "question": "教師あり学習の説明として最も適切なのはどれ？",
+            "choices": {
+                "A": "入力と正解ラベルを用いて学習する",
+                "B": "正解ラベルなしで構造を見つける",
+                "C": "報酬最大化の行動を学習する",
+                "D": "テキスト生成のみを扱う学習法"
+            },
+            "correct": "A",
+            "explanations": {
+                "A": "教師あり学習は入力と正解ラベルのペアで学習します。",
+                "B": "これは教師なし学習の説明です。",
+                "C": "これは強化学習の説明です。",
+                "D": "特定タスクの一例で学習設定そのものではありません。"
+            }
         }
-    },
-    {
-        "q": "過学習（オーバーフィッティング）を抑える代表的な手法は？",
-        "choices": ["ドロップアウト", "学習率を無限大にする", "訓練データを必ず減らす", "エポック数を必ず増やす"],
-        "ans": "A",
-        "exp": {
-            "A": "ドロップアウトは汎化性能を高め、過学習の抑制に有効。",
-            "B": "過大な学習率は不安定化する。",
-            "C": "一般にデータを減らすと過学習は悪化しやすい。",
-            "D": "エポック増は過学習を助長する場合がある。"
-        }
-    },
-    {
-        "q": "強化学習でオンポリシーTD法の代表例はどれ？",
-        "choices": ["SARSA", "K-means", "主成分分析", "線形回帰"],
-        "ans": "A",
-        "exp": {
-            "A": "SARSAはオンポリシーなTD学習法。",
-            "B": "K-meansは教師なしのクラスタリング。",
-            "C": "主成分分析は次元圧縮。",
-            "D": "線形回帰は回帰分析。"
-        }
-    }
-]
-
-def make_offline_question():
-    item = random.choice(OFFLINE_BANK)
-    return {
-        "question": item["q"],
-        "choices": item["choices"],
-        "correct": item["ans"],   # "A" / "B" / "C" / "D"
-        "explain": item["exp"]
-    }
-
-def set_question_to_state(payload):
-    st.session_state.question = payload["question"]
-    st.session_state.choices = payload["choices"]
-    st.session_state.correct = payload["correct"]
-    st.session_state.explain = payload["explain"]
-    st.session_state.picked = None
-    st.session_state.phase = "question"  # idle -> question -> answered
-
-def reset_state():
-    for k in ["question", "choices", "correct", "explain", "picked", "phase"]:
-        st.session_state.pop(k, None)
-    st.session_state.phase = "idle"
-
-# 初期化
-if "phase" not in st.session_state:
-    st.session_state.phase = "idle"
-
-# ======================
-# モデル選択（flash系を優先）
-# ======================
-try:
-    all_models = [m for m in genai.list_models() if "generateContent" in m.supported_generation_methods]
-    names = [m.name for m in all_models]
-    preferred = [n for n in names if "flash" in n]
-    others = [n for n in names if n not in preferred]
-    model_options = preferred + others if preferred else names
-except Exception as e:
-    st.sidebar.error(f"モデル一覧の取得失敗: {e}")
-    model_options = ["gemini-2.0-flash"]
-
-default_idx = 0
-for i, n in enumerate(model_options):
-    if "gemini-2.0-flash" in n:
-        default_idx = i
-        break
-
-model_name = st.sidebar.selectbox("使用モデルを選択", model_options, index=default_idx)
-st.sidebar.caption(f"選択モデル: `{model_name}`")
-
-# ======================
-# PDFロード
-# ======================
-syllabus_text = load_pdf_text(PDF_PATH)
-if not syllabus_text.strip():
-    st.error("シラバスPDFを読み込めません。`data/` 配置とファイル名を確認してください。")
-    st.stop()
-
-# ======================
-# 画面：出題ヘッダ
-# ======================
-st.header("出題")
-
-# 説明（初回）
-if st.session_state.phase == "idle":
-    st.info("「AIで問題を作る」を押すと、シラバスに基づく問題を生成します。無料枠がない場合はオフライン問題に切り替わります。")
-
-# ======================
-# 1) 出題ボタン（idle の時だけ有効）
-# ======================
-gen_btn = st.button("AIで問題を作る", disabled=(st.session_state.phase != "idle"))
-
-if gen_btn and st.session_state.phase == "idle":
-    # まずAIで生成を試みる
-    try:
-        model = genai.GenerativeModel(model_name)
-        prompt = (
-            "以下のG検定シラバス本文のみを根拠に、4択の単一正解問題を1問作成してください。"
-            "出力は次の厳密フォーマットで返してください：\n"
-            "【問題文】...\n"
-            "A: ...\nB: ...\nC: ...\nD: ...\n"
-            "【正解】A|B|C|D\n"
-            "【解説】\nA: ...\nB: ...\nC: ...\nD: ...\n"
-            "本文外の知識は使わないこと。曖昧表現は避けること。\n\n"
-            f"--- シラバス本文 ---\n{small_truncate(syllabus_text, 4000)}"
-        )
-        resp = model.generate_content(prompt)
-        text = (resp.text or "").strip()
-
-        # ざっくりパース
-        def pick(line_prefix, blob):
-            for line in blob.splitlines():
-                if line.startswith(line_prefix):
-                    return line[len(line_prefix):].strip()
-            return ""
-
-        q = ""
-        lines = text.splitlines()
-        for i, line in enumerate(lines):
-            if line.startswith("【問題文】"):
-                q = line.replace("【問題文】", "").strip()
-                break
-
-        A = pick("A:", text)
-        B = pick("B:", text)
-        C = pick("C:", text)
-        D = pick("D:", text)
-        correct_line = ""
-        for line in lines:
-            if line.startswith("【正解】"):
-                correct_line = line.replace("【正解】", "").strip()
-                break
-        correct = correct_line[:1] if correct_line else ""
-
-        # 解説
-        explA = ""
-        explB = ""
-        explC = ""
-        explD = ""
-        in_exp = False
-        for line in lines:
-            if line.startswith("【解説】"):
-                in_exp = True
-                continue
-            if in_exp:
-                if line.startswith("A:"):
-                    explA = line[2:].strip()
-                elif line.startswith("B:"):
-                    explB = line[2:].strip()
-                elif line.startswith("C:"):
-                    explC = line[2:].strip()
-                elif line.startswith("D:"):
-                    explD = line[2:].strip()
-
-        if not (q and A and B and C and D and correct in ["A","B","C","D"]):
-            # 形式が崩れたらフォールバック
-            raise ValueError("AI出力のフォーマット不整合")
-
-        payload = {
-            "question": q,
-            "choices": [A, B, C, D],
-            "correct": correct,
-            "explain": {"A": explA or "（本文根拠に基づく説明）",
-                        "B": explB or "（本文根拠に基づく説明）",
-                        "C": explC or "（本文根拠に基づく説明）",
-                        "D": explD or "（本文根拠に基づく説明）"}
-        }
-        set_question_to_state(payload)
-
-    except Exception as e:
-        # 429や失敗時はオフラインに切替
-        msg = str(e)
-        if "429" in msg or "quota" in msg.lower() or "free_tier" in msg.lower():
-            st.warning("Geminiの無料枠（クォータ）が 0 のため、オフライン問題を表示します。")
-        else:
-            st.warning(f"AI出題に失敗しました（{e}）。オフライン問題に切り替えます。")
-        set_question_to_state(make_offline_question())
-
-# ======================
-# 2) 出題中の画面（phase == question）
-# ======================
-if st.session_state.phase == "question":
-    st.subheader("出題")
-    st.write(st.session_state.question)
-
-    options = [
-        f"A：{st.session_state.choices[0]}",
-        f"B：{st.session_state.choices[1]}",
-        f"C：{st.session_state.choices[2]}",
-        f"D：{st.session_state.choices[3]}",
     ]
-    picked = st.radio("選択肢を選んでください：", options, index=0, key="answer_choice")
 
-    if st.button("回答する"):
-        st.session_state.picked = picked.split("：", 1)[0]  # "A"/"B"/"C"/"D"
-        st.session_state.phase = "answered"
-        st.rerun()  # ← 修正ポイント1
+def ensure_state():
+    if "question" not in st.session_state:
+        st.session_state.question = None   # 現在の出題データ(dict)
+    if "picked" not in st.session_state:
+        st.session_state.picked = None     # ユーザー選択（"A"〜"D"）
+    if "result" not in st.session_state:
+        st.session_state.result = None     # {"is_correct": bool, "reason": "..."}
+    if "mode" not in st.session_state:
+        st.session_state.mode = None       # "online" or "offline"
+    if "model_name" not in st.session_state:
+        st.session_state.model_name = None # 実際に使ったモデル名（オンライン時）
 
-# ======================
-# 3) 回答後の画面（phase == answered）
-# ======================
-if st.session_state.phase == "answered":
+ensure_state()
+
+# ====== Gemini オンライン出題 ======
+def get_gemini_api_key():
+    # Streamlit Cloud の「Secrets」に GCP の Gemini API キーを入れておく想定
+    # キー名: GEMINI_API_KEY
+    try:
+        return st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        return os.getenv("GEMINI_API_KEY")  # 念のため環境変数でも拾う
+
+@st.cache_data(show_spinner=False, ttl=900)
+def list_available_models(api_key: str):
+    """生成に使えるモデル（generateContent対応）を列挙。"""
+    import google.generativeai as genai
+    genai.configure(api_key=api_key)
+    models = []
+    try:
+        for m in genai.list_models():
+            # v0.8.x は supported_generation_methods を持つ
+            methods = getattr(m, "supported_generation_methods", []) or []
+            if "generateContent" in methods:
+                models.append(m.name)
+    except Exception:
+        # 取得失敗時は代表的な動作確認済みモデルにフォールバック
+        models = [
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-001",
+            "gemini-2.0-flash-lite",
+        ]
+    return sorted(models)
+
+def generate_with_gemini(model_name: str):
+    """Geminiで四択問題をJSONで生成。成功すれば dict を返し、失敗時は例外を投げる。"""
+    api_key = get_gemini_api_key()
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY が設定されていません。")
+
+    import google.generativeai as genai
+    genai.configure(api_key=api_key)
+
+    # PDFは今は読み取らず（モバイル運用を優先）。後で前処理辞書化する前提。
+    # ここでは一般的なG検定範囲の基礎問題をモデルに作らせる。
+    sys_prompt = (
+        "あなたはG検定対策の問題作成者です。"
+        "四択問題を1問だけ日本語で作成してください。"
+        "選択肢はA〜Dの4つ。正答は1つだけ。"
+        "各選択肢に短い解説も用意してください。"
+        "内容は一般的な機械学習/ディープラーニング/統計/倫理から基本的な範囲。"
+    )
+
+    # JSONで返すように強制
+    generation_config = {
+        "response_mime_type": "application/json",
+        "temperature": 0.6,
+        "max_output_tokens": 600,
+    }
+
+    prompt = {
+        "instruction": sys_prompt,
+        "format": {
+            "question": "問題文（1〜2文）",
+            "choices": {
+                "A": "選択肢A",
+                "B": "選択肢B",
+                "C": "選択肢C",
+                "D": "選択肢D"
+            },
+            "correct": "A|B|C|D のいずれか1つ",
+            "explanations": {
+                "A": "Aの解説（1文）",
+                "B": "Bの解説（1文）",
+                "C": "Cの解説（1文）",
+                "D": "Dの解説（1文）"
+            }
+        }
+    }
+
+    model = genai.GenerativeModel(model_name, generation_config=generation_config)
+    resp = model.generate_content(
+        [
+            {"role": "user", "parts": [json.dumps(prompt, ensure_ascii=False)]}
+        ]
+    )
+
+    # レスポンス取得（v0.8.x）
+    text = ""
+    try:
+        text = resp.candidates[0].content.parts[0].text
+    except Exception:
+        text = getattr(resp, "text", "")
+
+    data = json.loads(text)
+
+    # 最低限のバリデーション
+    req_keys = {"question", "choices", "correct", "explanations"}
+    if not req_keys.issubset(set(data.keys())):
+        raise ValueError("JSONに必要なキーが足りません。")
+
+    # 形をそろえる
+    q = {
+        "source": "online",
+        "question": data["question"],
+        "choices": data["choices"],
+        "correct": data["correct"],
+        "explanations": data["explanations"],
+    }
+    return q
+
+# ====== 出題フロー ======
+def start_online_or_offline(model_choice: str):
+    """オンライン試行→失敗ならオフライン"""
+    # まず既存状態をリセット（ただし直前の問題は画面に残したいので別キーに退避しない）
+    st.session_state.result = None
+    st.session_state.picked = None
+    st.session_state.model_name = None
+
+    # オンライン試行
+    try:
+        q = generate_with_gemini(model_choice)
+        st.session_state.question = q
+        st.session_state.mode = "online"
+        st.session_state.model_name = model_choice
+        st.success("オンライン（Gemini）で問題を生成しました。")
+        return
+    except Exception as e:
+        # よくある 429 / 無償枠0 / キー未設定 などはここに来る
+        st.info("Geminiが使えないため、オフライン問題に切り替えます。")
+        # print(str(e))  # 必要ならログ
+
+    # オフライン
+    bank = load_offline_bank()
+    st.session_state.question = random.choice(bank)
+    st.session_state.mode = "offline"
+    st.session_state.model_name = None
+
+def grade(picked: str):
+    q = st.session_state.question
+    is_correct = (picked == q["correct"])
+    # 結果保持（ページ遷移/再実行でも残す）
+    st.session_state.result = {
+        "is_correct": is_correct,
+        "picked": picked,
+        "correct": q["correct"]
+    }
+
+# ====== UI ======
+st.title("G検定クイズアプリ（Gemini/オフライン対応）")
+
+# モデル選択（APIキーがある場合のみ取得）
+models = []
+api_key_present = bool(get_gemini_api_key())
+if api_key_present:
+    models = list_available_models(get_gemini_api_key())
+
+selected_model = st.selectbox(
+    "使用モデルを選択（Geminiが使える時のみ有効）",
+    options=models if models else ["gemini-2.0-flash"],
+    index=0,
+    disabled=not api_key_present,
+)
+
+st.caption(
+    "「AIで問題を作る」を押すと、まず Gemini で問題を生成します。"
+    "APIが使えない/クオータ0などの場合は**自動的にオフライン問題**へ切替。"
+)
+
+# 出題ボタン
+if st.button("AIで問題を作る", type="primary"):
+    start_online_or_offline(selected_model)
+
+# ====== 出題表示 ======
+q = st.session_state.question
+if q:
+    st.subheader("出題")
+    # 問題文は常に残す
+    st.write(q["question"])
+
+    # 選択
+    choice_labels = [f"{k}：{v}" for k, v in q["choices"].items()]
+    # key を固定して再描画でも選択維持
+    picked_label = st.radio(
+        "選択肢を選んでください：",
+        options=choice_labels,
+        index=0 if st.session_state.picked is None else
+        list(q["choices"].keys()).index(st.session_state.picked),
+        key="picked_label_radio"
+    )
+
+    # ラベル → "A"/"B"/"C"/"D" に戻す
+    picked_key = picked_label.split("：", 1)[0]
+    st.session_state.picked = picked_key
+
+    submit_label = "回答する（オンライン）" if st.session_state.mode == "online" else "回答する（オフライン）"
+    if st.button(submit_label):
+        grade(st.session_state.picked)
+
+# ====== 結果表示（問題は残したまま下に表示） ======
+if st.session_state.result and st.session_state.question:
+    res = st.session_state.result
+    q = st.session_state.question
     st.subheader("結果")
 
-    # まず問題文を残して表示
-    st.markdown("#### 問題文")
-    st.write(st.session_state.question)
-
-    picked = st.session_state.picked
-    correct = st.session_state.correct
-
-    if picked == correct:
-        st.success(f"正解！ 選択：{picked} / 正解：{correct}")
+    if res["is_correct"]:
+        st.success(f"正解！ 選択：{res['picked']} / 正解：{res['correct']}")
     else:
-        st.error(f"不正解。 選択：{picked} / 正解：{correct}")
+        st.error(f"不正解… 選択：{res['picked']} / 正解：{res['correct']}")
 
-    # 選択肢と解説
     st.markdown("**解説（全選択肢）**")
-    labels = ["A", "B", "C", "D"]
-    for i, lab in enumerate(labels):
-        text = st.session_state.choices[i]
-        exp = st.session_state.explain.get(lab, "")
-        prefix = "✅" if lab == correct else ("🔴" if lab == picked else "・")
-        st.write(f"{prefix} {lab}：{text}")
-        if exp:
-            st.caption(f"解説：{exp}")
+    for key in ["A", "B", "C", "D"]:
+        mark = "✅" if key == q["correct"] else "・"
+        st.markdown(f"{mark} **{key}：{q['choices'][key]}**")
+        st.write(f"解説：{q['explanations'].get(key, '（解説なし）')}")
 
-    st.divider()
-    if st.button("次の問題へ"):
-        reset_state()
-        st.rerun()
+    # もう一問ボタン
+    if st.button("もう一問出す"):
+        # 次の出題のために結果だけクリア（問題は差し替える）
+        st.session_state.result = None
+        st.session_state.picked = None
+        start_online_or_offline(selected_model)
+
+# ====== フッタ情報 ======
+with st.expander("使い方（最短）"):
+    st.markdown(
+        "1. 上でモデルを選択（APIキーが設定済みのとき）\n"
+        "2. **AIで問題を作る** を押す → オンライン生成に挑戦し、ダメならオフライン\n"
+        "3. 回答 → 結果と全選択肢の解説を確認\n"
+        "4. **もう一問出す** で繰り返し\n\n"
+        "- PDF（`data/JDLA_Gtest_Syllabus_2024_v1.3_JP.pdf`）は今は読み込まず、"
+        "将来の前処理（章節ごとの要点辞書化）で使う想定です。\n"
+        "- オフライン問題は `problem_bank/question_bank.jsonl`（1行1問のJSON）から読み込みます。"
+    )
+
+st.caption(
+    ("オンライン: " + (st.session_state.model_name or "—"))
+    if st.session_state.mode == "online"
+    else "オフライン出題中"
+)
