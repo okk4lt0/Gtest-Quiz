@@ -6,41 +6,61 @@ import google.generativeai as genai
 st.set_page_config(page_title="G検定クイズアプリ（Gemini版）", page_icon="📝", layout="centered")
 st.title("G検定クイズアプリ（Gemini版）")
 
-# --- APIキー読込 ---
+# --- APIキー ---
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
 if not GEMINI_KEY:
     st.error("GEMINI_API_KEY が未設定です。Streamlit Secrets に GEMINI_API_KEY を保存してください。")
     st.stop()
 genai.configure(api_key=GEMINI_KEY)
 
-# --- モデル解決（利用可能なものを自動選択） ---
+# SDK バージョン表示（デバッグに有用）
+sdk_ver = getattr(genai, "__version__", "unknown")
+st.caption(f"google-generativeai version: `{sdk_ver}`")
+
+# --- 利用可能モデルの列挙（公式推奨のやり方） ---
+@st.cache_resource
+def get_supported_models():
+    names = []
+    try:
+        for m in genai.list_models():
+            methods = getattr(m, "supported_generation_methods", [])
+            # generateContent をサポートするモデルだけ集める（公式の属性名）
+            if "generateContent" in methods:
+                # 公式の出力は "models/xxx" 形式なので末尾IDに整形
+                model_id = m.name.split("/")[-1]
+                names.append(model_id)
+    except Exception as e:
+        st.warning(f"モデル一覧の取得に失敗しました: {e}")
+    return names
+
+supported = get_supported_models()
+if supported:
+    st.caption("このAPIキーで利用可能なモデル（generateContent対応）:")
+    st.code("\n".join(supported), language="text")
+else:
+    st.warning("このAPIキーで利用可能なモデル一覧を取得できませんでした。通信/権限の問題か、キー種別で制限されている可能性があります。")
+
+# 選好順（上から優先）。存在しない場合は supported の先頭にフォールバック
 PREFERRED = [
+    "gemini-1.5-flash-latest",
     "gemini-1.5-flash",
     "gemini-1.5-flash-8b",
     "gemini-1.5-pro",
-    "gemini-1.0-pro"
+    "gemini-1.0-pro",
 ]
+def choose_model():
+    # supported にあるものの中から優先候補を選ぶ
+    for m in PREFERRED:
+        if m in supported:
+            return m
+    # どれも無ければ、supported の先頭を使う（キーが許す唯一の選択肢）
+    return supported[0] if supported else None
 
-@st.cache_resource
-def resolve_model_name():
-    try:
-        models = list(genai.list_models())
-        # generateContent に対応するモデルのみ
-        ok = {
-            m.name.split("/")[-1]
-            for m in models
-            if hasattr(m, "supported_generation_methods") and "generateContent" in m.supported_generation_methods
-        }
-        for m in PREFERRED:
-            if m in ok:
-                return m
-    except Exception as e:
-        # 取得に失敗した場合は最有力候補を返して試す
-        return PREFERRED[0]
-    # 何も該当しなければ最有力候補
-    return PREFERRED[0]
+MODEL_NAME = choose_model()
+if not MODEL_NAME:
+    st.error("利用可能な Gemini モデルが見つかりません。APIキーのプランや提供状況をご確認ください。")
+    st.stop()
 
-MODEL_NAME = resolve_model_name()
 st.caption(f"使用モデル: `{MODEL_NAME}`")
 
 SYSTEM_NOTE = (
@@ -68,9 +88,10 @@ Cの解説：
 Dの解説：
 """.strip()
 
-def call_gemini(prompt: str) -> str:
-    model = genai.GenerativeModel(MODEL_NAME)
-    resp = model.generate_content(prompt)
+def generate_raw():
+    prompt = PROMPT_TEMPLATE.format(system=SYSTEM_NOTE)
+    model = genai.GenerativeModel(MODEL_NAME)  # 公式の推奨どおりの呼び出し方
+    resp = model.generate_content(prompt)       # generateContent を使用
     if not resp or not getattr(resp, "text", None):
         raise RuntimeError("Gemini から有効な応答が得られませんでした。")
     return resp.text.strip()
@@ -94,12 +115,7 @@ def parse_question_block(text: str):
         val = after(tag)
         if val:
             notes[tag] = f"{tag}：{val}"
-
     return {"question": question, "options": options, "answer": answer, "notes": notes, "raw": text}
-
-def generate_question():
-    prompt = PROMPT_TEMPLATE.format(system=SYSTEM_NOTE)
-    return call_gemini(prompt)
 
 # --- セッション ---
 if "item" not in st.session_state:
@@ -110,16 +126,14 @@ if "picked" not in st.session_state:
 with st.expander("使い方（最短）", expanded=False):
     st.markdown("1) 「AIで問題を作る」→ 2) 回答を選んで「回答する」→ 3) 解説を読む")
 
-col1, col2 = st.columns(2)
-with col1:
-    if st.button("AIで問題を作る"):
-        with st.spinner("問題を生成中…"):
-            try:
-                raw = generate_question()
-                st.session_state.item = parse_question_block(raw)
-                st.session_state.picked = None
-            except Exception as e:
-                st.error(f"生成に失敗しました: {e}")
+if st.button("AIで問題を作る"):
+    with st.spinner("問題を生成中…"):
+        try:
+            raw = generate_raw()
+            st.session_state.item = parse_question_block(raw)
+            st.session_state.picked = None
+        except Exception as e:
+            st.error(f"生成に失敗しました: {e}")
 
 item = st.session_state.item
 if item:
@@ -153,7 +167,5 @@ if item:
         for tag in ["Aの解説", "Bの解説", "Cの解説", "Dの解説"]:
             if tag in notes:
                 st.write(notes[tag])
-    else:
-        st.caption("※ 回答を選んで「回答する」を押してください。")
 else:
     st.caption("「AIで問題を作る」を押すと1問生成されます。")
