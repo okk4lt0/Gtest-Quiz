@@ -235,7 +235,6 @@ if st.session_state.phase == "question":
     st.subheader("出題")
     st.write(st.session_state.question)
 
-    # ラジオは安定キーで
     options = [
         f"A：{st.session_state.choices[0]}",
         f"B：{st.session_state.choices[1]}",
@@ -245,10 +244,9 @@ if st.session_state.phase == "question":
     picked = st.radio("選択肢を選んでください：", options, index=0, key="answer_choice")
 
     if st.button("回答する"):
-        # 先頭の文字（A/B/C/D）を抽出
-        st.session_state.picked = picked.split("：", 1)[0]
+        st.session_state.picked = picked.split("：", 1)[0]  # "A"/"B"/"C"/"D"
         st.session_state.phase = "answered"
-        st.experimental_rerun()
+        st.rerun()  # ← 修正ポイント1
 
 # ======================
 # 3) 回答後の画面（phase == answered）
@@ -276,4 +274,4 @@ if st.session_state.phase == "answered":
     st.divider()
     if st.button("次の問題へ"):
         reset_state()
-        st.experimental_rerun()
+        st.rerun()  # ← 修正ポイント2
