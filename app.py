@@ -8,48 +8,45 @@ from openai import OpenAI
 st.set_page_config(page_title="G検定クイズアプリ（GPT-5版）", page_icon="📝", layout="centered")
 st.title("G検定クイズアプリ（GPT-5版）")
 
-# OpenAIクライアント（Secretsの OPENAI_API_KEY を自動使用）
+# OpenAIクライアント（Secretsの OPENAI_API_KEY を使用）
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ========================
 # ヘルパー
 # ========================
 def generate_question():
+    """
+    GPT-5（Responses API）で、G検定向けの4択問題を1問生成。
+    """
     prompt = """
-あなたはAI検定の試験対策支援AIです。
-受験者が学習できるように4択クイズを1問作ってください。
+あなたは日本のG検定対策用のAI講師です。
+G検定シラバスの範囲に沿った内容から、1問だけ4択問題を日本語で作成してください。
+出力は必ず次のフォーマットで、不要な文言や装飾は付けないでください。
 
-形式は以下にしてください：
----
-問題:
-A:
-B:
-C:
-D:
-正解:
-解説:
-Aの解説:
-Bの解説:
-Cの解説:
-Dの解説:
----
+問題文：
+A：
+B：
+C：
+D：
+正解：（A〜Dのいずれか）
+解説：
+Aの解説：
+Bの解説：
+Cの解説：
+Dの解説：
+""".strip()
 
-出題分野はランダムで構いません。
-"""
-
-    from openai import OpenAI
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-
-    resp = client.chat.completions.create(
+    # ✅ GPT-5 は Responses API を使う（max_output_tokens を使用）
+    resp = client.responses.create(
         model="gpt-5",
-        messages=[
-            {"role": "system", "content": "あなたは試験問題作成AIです。"},
-            {"role": "user", "content": prompt},
+        input=[
+            {"role": "system", "content": "あなたは厳密で正確な出題者です。"},
+            {"role": "user",   "content": prompt},
         ],
-        max_output_tokens=800  # ← temperatureを削除
+        # temperature はこのモデルで未対応だったので指定しない
+        max_output_tokens=800,
     )
-
-    return resp.choices[0].message.content
+    return resp.output_text.strip()
 
 def parse_question_block(text: str):
     """
@@ -68,7 +65,7 @@ def parse_question_block(text: str):
     # 正解
     ans_line = next((l for l in lines if l.startswith("正解")), "")
     ans = (ans_line.replace("正解：", "").replace("正解:", "").strip() or "").upper()
-    ans = ans[:1] if ans in ["A", "B", "C", "D"] else ans[:1]  # 先頭文字だけ取り出して保険
+    ans = ans[:1] if ans[:1] in ["A", "B", "C", "D"] else ""
 
     # 解説群（そのまま表示）
     notes = {}
@@ -80,7 +77,7 @@ def parse_question_block(text: str):
     return {
         "question": q,
         "options": opts,
-        "answer": ans if ans in ["A", "B", "C", "D"] else "",
+        "answer": ans,
         "notes": notes,
         "raw": text
     }
