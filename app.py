@@ -253,6 +253,11 @@ if st.session_state.phase == "question":
 # ======================
 if st.session_state.phase == "answered":
     st.subheader("結果")
+
+    # まず問題文を残して表示
+    st.markdown("#### 問題文")
+    st.write(st.session_state.question)
+
     picked = st.session_state.picked
     correct = st.session_state.correct
 
@@ -261,7 +266,8 @@ if st.session_state.phase == "answered":
     else:
         st.error(f"不正解。 選択：{picked} / 正解：{correct}")
 
-    st.markdown("**解説**（全選択肢）")
+    # 選択肢と解説
+    st.markdown("**解説（全選択肢）**")
     labels = ["A", "B", "C", "D"]
     for i, lab in enumerate(labels):
         text = st.session_state.choices[i]
@@ -274,4 +280,4 @@ if st.session_state.phase == "answered":
     st.divider()
     if st.button("次の問題へ"):
         reset_state()
-        st.rerun()  # ← 修正ポイント2
+        st.rerun()
