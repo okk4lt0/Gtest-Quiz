@@ -1,6 +1,10 @@
 import os
 import streamlit as st
 from openai import OpenAI
+import openai
+import streamlit as st
+
+st.write("OpenAI SDK version:", openai.__version__)
 
 # ✅ GPT-5 対応クライアント
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -31,7 +35,7 @@ Dの解説：
         model="gpt-5",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7,
-        max_output_tokens=800,
+        max_tokens=800,
     )
     return resp.choices[0].message.content.strip()
 
