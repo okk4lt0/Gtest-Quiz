@@ -1,0 +1,45 @@
+name: Auto Refill Question Bank
+
+on:
+  # 手動実行
+  workflow_dispatch: {}
+  # 毎日 04:00 JST に実行（GitHub Actions の cron は UTC。JST 04:00 = 前日 19:00 UTC）
+  schedule:
+    - cron: "0 19 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  refill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-generativeai pypdf
+
+      - name: Run auto_refill
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # 必要なら以下で調整可能
+          GEMINI_MODEL: gemini-2.0-flash
+          NUM_QUESTIONS: "3"
+        run: |
+          python tools/auto_refill.py
+
+      - name: Commit & push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bank/question_bank.jsonl || true
+          git diff --cached --quiet || git commit -m "chore: auto-refill question bank"
+          git push
