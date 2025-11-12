@@ -1,24 +1,28 @@
 import os
 import streamlit as st
 from openai import OpenAI
-import openai
-import streamlit as st
 
-st.write("OpenAI SDK version:", openai.__version__)
-
-# ✅ GPT-5 対応クライアント
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
+# ========================
+# 基本設定
+# ========================
+st.set_page_config(page_title="G検定クイズアプリ（GPT-5版）", page_icon="📝", layout="centered")
 st.title("G検定クイズアプリ（GPT-5版）")
 
-# === 問題をAIで生成 ===
+# OpenAIクライアント（Secretsの OPENAI_API_KEY を自動使用）
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# ========================
+# ヘルパー
+# ========================
 def generate_question():
+    """
+    GPT-5（Responses API）で、G検定向けの4択問題を1問生成。
+    """
     prompt = """
 あなたは日本のG検定対策用のAI講師です。
-以下の形式で1問の4択問題を日本語で作ってください。
-必ずG検定シラバスに関連する内容にしてください。
+G検定シラバスの範囲に沿った内容から、1問だけ4択問題を日本語で作成してください。
+出力は必ず次のフォーマットで、不要な文言や装飾は付けないでください。
 
-【出力形式】
 問題文：
 A：
 B：
@@ -30,51 +34,118 @@ Aの解説：
 Bの解説：
 Cの解説：
 Dの解説：
-"""
-    resp = client.chat.completions.create(
+""".strip()
+
+    # ✅ GPT-5は Responses API を使う（SDK 2.x）
+    resp = client.responses.create(
         model="gpt-5",
-        messages=[{"role": "user", "content": prompt}],
+        input=[
+            {"role": "system", "content": "あなたは厳密で正確な出題者です。"},
+            {"role": "user", "content": prompt},
+        ],
         temperature=0.7,
-        max_tokens=800,
+        max_output_tokens=800,  # Responses API の正しい長さ制御パラメータ
     )
-    return resp.choices[0].message.content.strip()
+    return resp.output_text.strip()
 
-# === メイン処理 ===
-if "question_data" not in st.session_state:
-    if st.button("AIで問題を作る"):
-        with st.spinner("問題を生成中...（数秒お待ちください）"):
-            st.session_state.question_data = generate_question()
-
-# === 出題と回答 ===
-if "question_data" in st.session_state:
-    lines = [l.strip() for l in st.session_state.question_data.splitlines() if l.strip()]
-    q_text = next((l.replace("問題文：", "").replace("問題文:", "") for l in lines if "問題文" in l), "問題が生成されませんでした。")
-    st.write("### 問題")
-    st.write(q_text)
-
-    # 選択肢抽出
-    options = {}
+def parse_question_block(text: str):
+    """
+    生成テキストを簡易パースして {question, options, answer, notes} を返す。
+    """
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    # 問題文
+    q = next((l.split("：", 1)[-1] if "：" in l else l.split(":", 1)[-1]
+              for l in lines if l.startswith("問題文")), "問題が取得できませんでした。")
+    # 選択肢
+    opts = {}
     for k in ["A", "B", "C", "D"]:
-        opt = next((l for l in lines if l.startswith(f"{k}：") or l.startswith(f"{k}:")), None)
-        if opt:
-            options[k] = opt.split("：", 1)[-1].split(":", 1)[-1].strip()
+        line = next((l for l in lines if l.startswith(f"{k}：") or l.startswith(f"{k}:")), None)
+        if line:
+            opts[k] = line.split("：", 1)[-1].split(":", 1)[-1].strip()
+    # 正解
+    ans_line = next((l for l in lines if l.startswith("正解")), "")
+    ans = (ans_line.replace("正解：", "").replace("正解:", "").strip() or "").upper()
+    ans = ans[:1] if ans in ["A", "B", "C", "D"] else ans[:1]  # 先頭文字だけ取り出して保険
 
-    answer_line = next((l for l in lines if l.startswith("正解")), "")
-    answer = answer_line.replace("正解：", "").replace("正解:", "").strip()
+    # 解説群（そのまま表示）
+    notes = {}
+    for tag in ["解説", "Aの解説", "Bの解説", "Cの解説", "Dの解説"]:
+        seg = next((l for l in lines if l.startswith(tag)), None)
+        if seg:
+            notes[tag] = seg
 
-    if options:
-        selected = st.radio("選択肢を選んでください：",
-                            [f"A：{options['A']}", f"B：{options['B']}",
-                             f"C：{options['C']}", f"D：{options['D']}"])
+    return {
+        "question": q,
+        "options": opts,
+        "answer": ans if ans in ["A", "B", "C", "D"] else "",
+        "notes": notes,
+        "raw": text
+    }
+
+# ========================
+# UI（セッション管理）
+# ========================
+if "item" not in st.session_state:
+    st.session_state.item = None
+if "picked" not in st.session_state:
+    st.session_state.picked = None
+
+with st.expander("使い方（最短）", expanded=False):
+    st.markdown(
+        "1) 「AIで問題を作る」を押す → 2) 回答を選んで「回答する」 → 3) 解説を読む\n"
+        "※ まずはランダム出題。あとでシラバスPDF対応を加えられます。"
+    )
+
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("AIで問題を作る"):
+        with st.spinner("問題を生成中…"):
+            try:
+                raw = generate_question()
+                st.session_state.item = parse_question_block(raw)
+                st.session_state.picked = None
+            except Exception as e:
+                st.error(f"生成に失敗しました: {e}")
+
+# ========================
+# 出題〜判定表示
+# ========================
+item = st.session_state.item
+if item:
+    st.subheader("出題")
+    st.write(item["question"])
+
+    opts = item["options"]
+    if len(opts) == 4:
+        labels = [f"A：{opts['A']}", f"B：{opts['B']}", f"C：{opts['C']}", f"D：{opts['D']}"]
+        choice = st.radio("選択肢を選んでください：", labels, index=0)
         if st.button("回答する"):
-            picked = selected[0]
-            if picked == answer:
+            st.session_state.picked = choice[0]  # 先頭の A/B/C/D を取る
+
+    if st.session_state.picked:
+        ans = item["answer"]
+        if not ans:
+            st.warning("正解の抽出に失敗しました。生成結果を確認してください。")
+            st.code(item["raw"])
+        else:
+            ok = (st.session_state.picked == ans)
+            if ok:
                 st.success("正解です！🎉")
             else:
-                st.error(f"不正解です。正解は {answer} です。")
-            st.divider()
-            st.subheader("🧠 解説")
-            for tag in ["解説", "Aの解説", "Bの解説", "Cの解説", "Dの解説"]:
-                seg = next((l for l in lines if l.startswith(tag)), None)
-                if seg:
-                    st.write(seg)
+                st.error(f"不正解。正解は {ans} です。")
+
+        st.divider()
+        st.subheader("🧠 解説")
+        notes = item["notes"]
+        # 全体解説
+        if "解説" in notes:
+            st.write(notes["解説"])
+        # 選択肢ごとの解説（あれば）
+        for tag in ["Aの解説", "Bの解説", "Cの解説", "Dの解説"]:
+            if tag in notes:
+                st.write(notes[tag])
+    else:
+        st.caption("※ 回答を選んで「回答する」を押してください。")
+
+else:
+    st.caption("「AIで問題を作る」を押すと1問生成されます。")
