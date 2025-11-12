@@ -15,38 +15,41 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # ヘルパー
 # ========================
 def generate_question():
-    """
-    GPT-5（Responses API）で、G検定向けの4択問題を1問生成。
-    """
     prompt = """
-あなたは日本のG検定対策用のAI講師です。
-G検定シラバスの範囲に沿った内容から、1問だけ4択問題を日本語で作成してください。
-出力は必ず次のフォーマットで、不要な文言や装飾は付けないでください。
+あなたはAI検定の試験対策支援AIです。
+受験者が学習できるように4択クイズを1問作ってください。
 
-問題文：
-A：
-B：
-C：
-D：
-正解：（A〜Dのいずれか）
-解説：
-Aの解説：
-Bの解説：
-Cの解説：
-Dの解説：
-""".strip()
+形式は以下にしてください：
+---
+問題:
+A:
+B:
+C:
+D:
+正解:
+解説:
+Aの解説:
+Bの解説:
+Cの解説:
+Dの解説:
+---
 
-    # ✅ GPT-5は Responses API を使う（SDK 2.x）
-    resp = client.responses.create(
+出題分野はランダムで構いません。
+"""
+
+    from openai import OpenAI
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+
+    resp = client.chat.completions.create(
         model="gpt-5",
-        input=[
-            {"role": "system", "content": "あなたは厳密で正確な出題者です。"},
+        messages=[
+            {"role": "system", "content": "あなたは試験問題作成AIです。"},
             {"role": "user", "content": prompt},
         ],
-        temperature=0.7,
-        max_output_tokens=800,  # Responses API の正しい長さ制御パラメータ
+        max_output_tokens=800  # ← temperatureを削除
     )
-    return resp.output_text.strip()
+
+    return resp.choices[0].message.content
 
 def parse_question_block(text: str):
     """
