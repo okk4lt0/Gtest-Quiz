@@ -1,13 +1,12 @@
 # app.py
 # G検定クイズ（オンライン=Gemini → 失敗時はオフライン）＋ 使用量メーター
-# 依存: streamlit, google-generativeai
 
 import os
 import json
 from pathlib import Path
 import random
-import time
 from datetime import datetime, timedelta, timezone
+
 import streamlit as st
 
 # ===== 基本設定 =====
@@ -17,29 +16,26 @@ APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
 BANK_DIR = APP_DIR / "bank"                      # 問題バンクの場所
 BANK_FILE = BANK_DIR / "question_bank.jsonl"     # 1行1問の JSON Lines
+METER_FILE = BANK_DIR / "usage_meter.json"       # 使用量メーター保存先
 
-# ===== メーター設定（推定値。必要ならSidebarで変更可能） =====
-DEFAULT_DAILY_LIMIT = int(os.getenv("GEMINI_DAILY_LIMIT", "5"))   # Free相当の目安
-DEFAULT_RPM_LIMIT   = int(os.getenv("GEMINI_RPM_LIMIT", "2"))     # 1分あたりの目安
-
-METER_FILE = BANK_DIR / "usage_meter.json"  # リクエスト履歴をローカル保存（Streamlit CloudでもGit追跡対象外が望ましい）
-
+DEFAULT_DAILY_LIMIT = int(os.getenv("GEMINI_DAILY_LIMIT", "5"))
+DEFAULT_RPM_LIMIT = int(os.getenv("GEMINI_RPM_LIMIT", "2"))
 JST = timezone(timedelta(hours=9))
 
-# ===== 状態確保 =====
+# ===== セッション状態 =====
 def ensure_state():
     ss = st.session_state
-    ss.setdefault("question", None)     # 現在の出題（dict）
+    ss.setdefault("question", None)     # 現在の出題
     ss.setdefault("picked", None)       # "A"〜"D"
     ss.setdefault("result", None)       # 採点結果
     ss.setdefault("mode", None)         # "online" / "offline"
-    ss.setdefault("model_name", None)   # 実際に使ったモデル名
-    ss.setdefault("last_error", "")     # 直近のオンライン失敗メッセージ
+    ss.setdefault("model_name", None)   # 使用モデル名
+    ss.setdefault("last_error", "")     # 直近のオンラインエラー文
+
 ensure_state()
 
-# ===== メーターストレージ =====
+# ===== 使用量メーター =====
 def load_meter() -> dict:
-    """usage_meter.json を読み込み。なければ初期化。"""
     BANK_DIR.mkdir(parents=True, exist_ok=True)
     if METER_FILE.exists():
         try:
@@ -52,12 +48,16 @@ def load_meter() -> dict:
         "rpm_limit": DEFAULT_RPM_LIMIT,
         "today": datetime.now(JST).strftime("%Y-%m-%d"),
         "calls_today": 0,
-        "call_timestamps": [],   # ISO文字列の配列（直近数分）
-        "last_429_at": None
+        "call_timestamps": [],
+        "last_429_at": None,
     }
 
 def save_meter(m: dict):
-    METER_FILE.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        METER_FILE.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        # 書き込みできない環境でもアプリ自体は動かす
+        pass
 
 def reset_if_new_day(m: dict):
     today = datetime.now(JST).strftime("%Y-%m-%d")
@@ -69,18 +69,15 @@ def reset_if_new_day(m: dict):
 
 def record_call(m: dict, ok: bool, is_429: bool):
     now = datetime.now(JST)
-    # 直近1分の履歴を維持
     cutoff = now - timedelta(minutes=2)
     kept = []
     for t in m.get("call_timestamps", []):
         try:
             dt = datetime.fromisoformat(t)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=JST)
         except Exception:
             continue
         if dt >= cutoff:
-            kept.append(dt.astimezone(JST).isoformat())
+            kept.append(dt.isoformat())
     kept.append(now.isoformat())
     m["call_timestamps"] = kept
 
@@ -90,7 +87,6 @@ def record_call(m: dict, ok: bool, is_429: bool):
         m["last_429_at"] = now.isoformat()
 
 def rpm_window_info(m: dict):
-    """直近60秒での呼び出し数と、次に安全になるまでの目安秒数。"""
     now = datetime.now(JST)
     window_start = now - timedelta(seconds=60)
     cnt = 0
@@ -98,8 +94,6 @@ def rpm_window_info(m: dict):
     for t in m.get("call_timestamps", []):
         try:
             dt = datetime.fromisoformat(t)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=JST)
         except Exception:
             continue
         if dt >= window_start:
@@ -107,8 +101,8 @@ def rpm_window_info(m: dict):
             if oldest is None or dt < oldest:
                 oldest = dt
     cooldown_sec = 0
-    if cnt >= int(m.get("rpm_limit", DEFAULT_RPM_LIMIT)) and oldest:
-        # 最古の呼び出しから60秒経過するまで
+    rpm_limit = max(1, int(m.get("rpm_limit", DEFAULT_RPM_LIMIT)))
+    if cnt >= rpm_limit and oldest:
         cooldown_sec = max(0, 60 - int((now - oldest).total_seconds()))
     return cnt, cooldown_sec
 
@@ -119,16 +113,14 @@ def get_daily_progress(m: dict):
     remaining = max(0, limit - used)
     return used, limit, remaining, ratio
 
-# ===== ユーティリティ（問題バンク） =====
-def normalize_item(item: dict) -> dict | None:
-    """行ごとの辞書をアプリ内部の統一形式に変換"""
+# ===== 問題バンク =====
+def normalize_item(item: dict):
     if not isinstance(item, dict):
         return None
     q = item.get("question")
     choices = item.get("choices")
     correct = item.get("correct") or item.get("answer")
 
-    # choices が配列なら A〜D に割り当て
     if isinstance(choices, list) and len(choices) == 4:
         choices = {k: v for k, v in zip(["A", "B", "C", "D"], choices)}
 
@@ -137,15 +129,19 @@ def normalize_item(item: dict) -> dict | None:
     if correct not in ["A", "B", "C", "D"]:
         return None
 
+    explanations = item.get("explanations") or {}
+    if isinstance(explanations, list) and len(explanations) == 4:
+        explanations = {k: v for k, v in zip(["A", "B", "C", "D"], explanations)}
+
     return {
         "source": item.get("source", "offline"),
         "question": q,
         "choices": choices,
         "correct": correct,
-        "explanations": item.get("explanations", {})
+        "explanations": explanations,
     }
 
-def read_jsonl(path: Path) -> list[dict]:
+def read_jsonl(path: Path):
     items = []
     if path.exists():
         with path.open("r", encoding="utf-8") as f:
@@ -162,11 +158,10 @@ def read_jsonl(path: Path) -> list[dict]:
                     items.append(norm)
     return items
 
-def load_offline_bank() -> list[dict]:
+def load_offline_bank():
     bank = read_jsonl(BANK_FILE)
     if bank:
         return bank
-    # バンクが空のときの最低限の1問
     return [{
         "source": "offline_default",
         "question": "教師あり学習の説明として最も適切なのはどれ？",
@@ -174,26 +169,26 @@ def load_offline_bank() -> list[dict]:
             "A": "入力と正解ラベルを用いて学習する",
             "B": "正解ラベルなしで構造を見つける",
             "C": "報酬最大化の行動を学習する",
-            "D": "テキスト生成のみを扱う学習法"
+            "D": "テキスト生成のみを扱う学習法",
         },
         "correct": "A",
         "explanations": {
             "A": "教師あり学習は入力と正解ラベルのペアで学習します。",
             "B": "これは教師なし学習の説明です。",
             "C": "これは強化学習の説明です。",
-            "D": "学習設定の説明ではありません。"
-        }
+            "D": "学習設定の説明ではありません。",
+        },
     }]
 
-# ===== Gemini（オンライン） =====
-def get_gemini_api_key() -> str | None:
+# ===== Gemini（オンライン生成） =====
+def get_gemini_api_key():
     try:
         return st.secrets["GEMINI_API_KEY"]
     except Exception:
         return os.getenv("GEMINI_API_KEY")
 
 @st.cache_data(show_spinner=False, ttl=900)
-def list_available_models(api_key: str) -> list[str]:
+def list_available_models(api_key: str):
     import google.generativeai as genai
     genai.configure(api_key=api_key)
     models = []
@@ -203,12 +198,14 @@ def list_available_models(api_key: str) -> list[str]:
             if "generateContent" in methods:
                 models.append(m.name)
     except Exception:
-        # 取得失敗時のフォールバック候補
-        models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
+        models = [
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+        ]
     return sorted(models)
 
-def generate_with_gemini(model_name: str, meter: dict) -> dict:
-    """Geminiで1問生成し内部形式で返す。失敗時は例外を送出。メーター記録込み。"""
+def generate_with_gemini(model_name: str, meter: dict):
     api_key = get_gemini_api_key()
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY が設定されていません。")
@@ -217,9 +214,9 @@ def generate_with_gemini(model_name: str, meter: dict) -> dict:
     genai.configure(api_key=api_key)
 
     sys_prompt = (
-        "あなたはG検定対策の問題作成者です。四択問題を1問だけ日本語で作成。"
-        "選択肢はA〜Dで1つだけ正解。各選択肢に1文の解説を付ける。"
-        "内容は機械学習/ディープラーニング/統計/倫理の基礎範囲から。"
+        "あなたはG検定対策の問題作成者です。四択問題を1問だけ日本語で作成します。"
+        "選択肢はA〜Dで1つだけ正解。各選択肢に1文の解説を付けてください。"
+        "内容は機械学習・ディープラーニング・統計・倫理の基礎範囲から出題してください。"
     )
     generation_config = {
         "response_mime_type": "application/json",
@@ -230,14 +227,17 @@ def generate_with_gemini(model_name: str, meter: dict) -> dict:
         "question": "問題文（1〜2文）",
         "choices": {"A": "…", "B": "…", "C": "…", "D": "…"},
         "correct": "A|B|C|D のいずれか1つ",
-        "explanations": {"A": "…", "B": "…", "C": "…", "D": "…"}
+        "explanations": {"A": "…", "B": "…", "C": "…", "D": "…"},
     }
 
-    # 呼ぶ直前にメーター日付を同期
     reset_if_new_day(meter)
     try:
         model = genai.GenerativeModel(model_name, generation_config=generation_config)
-        resp = model.generate_content([{"role": "user", "parts": [sys_prompt, json.dumps(payload, ensure_ascii=False)]}])
+        resp = model.generate_content(
+            [
+                {"role": "user", "parts": [sys_prompt, json.dumps(payload, ensure_ascii=False)]}
+            ]
+        )
         text = ""
         try:
             text = resp.candidates[0].content.parts[0].text
@@ -247,24 +247,22 @@ def generate_with_gemini(model_name: str, meter: dict) -> dict:
         data = json.loads(text)
         norm = normalize_item(data)
         if not norm:
-            raise ValueError("Gemini応答の形式が不正です。")
-        norm["source"] = "online"
+            raise ValueError("Geminiの応答形式が不正です。")
 
-        # 成功記録
+        norm["source"] = "online"
         record_call(meter, ok=True, is_429=False)
         save_meter(meter)
         return norm
 
     except Exception as e:
-        # 429などの目印
-        is_429 = ("429" in str(e)) or ("Resource exhausted" in str(e)) or ("quota" in str(e).lower()) or ("rate" in str(e).lower())
+        msg = str(e)
+        is_429 = ("429" in msg) or ("Resource exhausted" in msg) or ("quota" in msg.lower()) or ("rate" in msg.lower())
         record_call(meter, ok=False, is_429=is_429)
         save_meter(meter)
         raise
 
 # ===== 出題・採点 =====
 def start_online_or_offline(model_choice: str, meter: dict):
-    """まずオンラインに挑戦。失敗ならオフラインへ切替。"""
     st.session_state.result = None
     st.session_state.picked = None
     st.session_state.model_name = None
@@ -290,31 +288,39 @@ def grade(picked: str):
     st.session_state.result = {
         "is_correct": (picked == q["correct"]),
         "picked": picked,
-        "correct": q["correct"]
+        "correct": q["correct"],
     }
 
-# ===== UI: メーター表示 =====
+# ===== メーター読み込み =====
 meter = load_meter()
 reset_if_new_day(meter)
 
+# ===== サイドバー：使用量メーター =====
 with st.sidebar:
     st.subheader("使用量メーター")
-    # 目安上限はユーザーが調整可能
     c1, c2 = st.columns(2)
     with c1:
-        meter["daily_limit"] = st.number_input("1日の目安回数", 1, 1000, int(meter.get("daily_limit", DEFAULT_DAILY_LIMIT)))
+        meter["daily_limit"] = st.number_input(
+            "1日の目安回数", 1, 1000, int(meter.get("daily_limit", DEFAULT_DAILY_LIMIT))
+        )
     with c2:
-        meter["rpm_limit"] = st.number_input("1分の目安回数", 1, 60, int(meter.get("rpm_limit", DEFAULT_RPM_LIMIT)))
+        meter["rpm_limit"] = st.number_input(
+            "1分の目安回数", 1, 60, int(meter.get("rpm_limit", DEFAULT_RPM_LIMIT))
+        )
 
     used, limit, remaining, ratio = get_daily_progress(meter)
-    st.progress(ratio, text=f"今日の使用: {used}/{limit} （残り {remaining}）")
+    st.progress(ratio, text=f"今日の使用: {used}/{limit}（残り {remaining}）")
 
     cnt_1m, cooldown = rpm_window_info(meter)
     st.caption(f"直近60秒のリクエスト: {cnt_1m}/{meter['rpm_limit']}")
 
     if meter.get("last_429_at"):
-        last429 = datetime.fromisoformat(meter["last_429_at"]).astimezone(JST)
-        st.caption(f"最後の429: {last429.strftime('%H:%M:%S')} JST")
+        try:
+            last429 = datetime.fromisoformat(meter["last_429_at"]).astimezone(JST)
+            st.caption(f"最後の429: {last429.strftime('%H:%M:%S')} JST")
+        except Exception:
+            pass
+
     if cooldown > 0:
         st.warning(f"混雑の可能性あり。目安クールダウン: {cooldown} 秒")
 
@@ -337,7 +343,10 @@ selected_model = st.selectbox(
     disabled=not bool(api_key),
 )
 
-st.caption("まず Gemini で生成を試み、失敗時は自動でオフライン問題に切替します。サイドバーに推定メーターを表示しています。")
+st.caption(
+    "まず Gemini で生成を試み、失敗時は自動でオフライン問題に切り替えます。"
+    "サイドバーに推定の使用量メーターを表示しています。"
+)
 
 if st.button("AIで問題を作る", type="primary"):
     start_online_or_offline(selected_model, meter)
@@ -352,14 +361,17 @@ if q:
     if st.session_state.picked in q["choices"]:
         default_idx = ["A", "B", "C", "D"].index(st.session_state.picked)
 
-    chosen_label = st.radio("選択肢：", options=labels, index=default_idx, key="picked_label_radio")
+    chosen_label = st.radio(
+        "選択肢：", options=labels, index=default_idx, key="picked_label_radio"
+    )
     st.session_state.picked = chosen_label.split("：", 1)[0]
 
-    submit_label = "回答する（オンライン）" if st.session_state.mode == "online" else "回答する（オフライン）"
+    submit_label = (
+        "回答する（オンライン）" if st.session_state.mode == "online" else "回答する（オフライン）"
+    )
     if st.button(submit_label):
         grade(st.session_state.picked)
 
-# 結果は問題の下に表示（問題は残す）
 if st.session_state.result and st.session_state.question:
     res = st.session_state.result
     q = st.session_state.question
@@ -381,7 +393,11 @@ if st.session_state.result and st.session_state.question:
         st.session_state.picked = None
         start_online_or_offline(selected_model, meter)
 
-mode_info = ("オンライン: " + (st.session_state.model_name or "—")) if st.session_state.mode == "online" else "オフライン出題中"
+mode_info = (
+    "オンライン: " + (st.session_state.model_name or "—")
+    if st.session_state.mode == "online"
+    else "オフライン出題中"
+)
 if st.session_state.last_error:
     st.caption(mode_info + f"｜最後のオンラインエラー: {st.session_state.last_error[:80]}…")
 else:
