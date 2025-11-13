@@ -431,6 +431,8 @@ if st.session_state.result and st.session_state.question:
 
     if st.button("もう一問出す", key="btn_next"):
         start_online_or_offline(selected_model)
+        import streamlit as st  # ファイルの先頭に既にあるなら不要
+        st.rerun()
 
 # フッタ
 with st.expander("使い方"):
