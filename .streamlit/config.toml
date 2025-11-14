@@ -1,5 +1,91 @@
-[client]
-showSidebarNavigation = false
+# ============================================================
+#  G検定対策クイズアプリ 設定ファイル
+#  - Gemini API 設定
+#  - 出題ロジック
+#  - UI カラー・レイアウト
+#  - 推定クォータメーター
+# ============================================================
 
-[theme]
-base="light"
+# ------------------------------------------------------------
+# Gemini API
+# ------------------------------------------------------------
+[gemini]
+# GCP プロジェクト ID（必要な場合のみ）
+project_id = ""
+
+# リージョン（空欄なら SDK のデフォルト）
+location = ""
+
+# モデル設定
+#   auto      : 自動選択（推奨）
+#   明示指定  : "gemini-2.0-flash", "gemini-2.0-pro" など
+default_model = "auto"
+
+# アプリ起動時にオンライン出題を初期状態で有効にするか
+online_enabled_default = true
+
+
+# ------------------------------------------------------------
+# ファイルパス
+# ------------------------------------------------------------
+[paths]
+meta           = "bank/meta.json"
+question_bank  = "bank/question_bank.jsonl"
+syllabus_pdf   = "data/JDLA_Gtest_Syllabus_2024_v1.3_JP.pdf"
+
+
+# ------------------------------------------------------------
+# 出題ロジック
+# ------------------------------------------------------------
+[question]
+
+# 直近何章を出題から避けるか（章バランス制御）
+avoid_recent_chapter_count = 3
+
+# 難易度別の重み（オフライン出題時のランダム選択）
+difficulty_weights = { basic = 1.0, standard = 1.2, advanced = 0.8 }
+
+# 推定クォータに対するソフトリミット
+# → 0.9 = 上限の 90% 超えたらオンラインを控える
+quota_soft_limit_ratio = 0.9
+
+
+# ------------------------------------------------------------
+# UI デザイン設定
+# ------------------------------------------------------------
+[ui]
+app_title       = "G検定対策クイズアプリ"
+app_description = "G検定シラバス準拠の四択クイズで、AI とオフライン問題を組み合わせて学習するアプリ。"
+
+# カラーパレット（UI 全体の統一テーマ）
+palette = {
+  primary      = "#1947E5",
+  primary_soft = "#E4EBFF",
+  background   = "#0F172A",
+  surface      = "#111827",
+  text_main    = "#F9FAFB",
+  text_muted   = "#9CA3AF",
+  accent       = "#22C55E",
+  danger       = "#F97373"
+}
+
+# フォント
+font_family_base = "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+font_family_mono = "SFMono-Regular, Menlo, Monaco, Consolas, 'Courier New', monospace"
+
+# レイアウト
+layout_wide = true
+radius_small = 6
+radius_medium = 12
+radius_large = 20
+shadow_elevation = "medium"  # none | small | medium | strong
+
+
+# ------------------------------------------------------------
+# 推定クォータメーター
+# ------------------------------------------------------------
+[quota_meter]
+show_in_sidebar = true
+token_label = "本日のトークン使用量（入力＋出力）"
+call_label  = "本日の API 呼び出し回数"
+unknown_limit_hint = "十分なデータがないため、まだ正確な上限は推定できていない。利用を続けると精度が向上する。"
