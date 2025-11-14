@@ -1,7 +1,0 @@
-# bank/.gitignore
-*.tmp
-*.log
-*.bak
-.DS_Store
-*.pdf
-*.csv
