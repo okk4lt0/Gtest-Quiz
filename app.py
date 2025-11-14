@@ -193,6 +193,8 @@ def ensure_state():
         st.session_state.model_name = None
     if "available_models" not in st.session_state:
         st.session_state.available_models = []
+    if "theme" not in st.session_state:
+        st.session_state.theme = "全範囲（G検定シラバス全般）"
 
     if "usage" not in st.session_state:
         today = date.today().isoformat()
@@ -254,7 +256,36 @@ def pick_default_model(models: list[str]) -> str:
     return models[0]
 
 
-def generate_with_gemini(model_name: str) -> dict:
+# シラバスの章（テーマ）オプション
+SYLLABUS_THEMES = [
+    "全範囲（G検定シラバス全般）",
+    "A：人工知能とは",
+    "B：人工知能技術の基礎",
+    "C：機械学習のアルゴリズム",
+    "D：ディープラーニング",
+    "E：応用分野",
+    "F：AIの倫理・社会・法律",
+]
+
+
+def build_theme_prompt(theme_label: str | None) -> str:
+    """
+    ユーザーが選んだテーマラベルから、Geminiに渡すテーマ説明文を作る。
+    """
+    if not theme_label or theme_label.startswith("全範囲"):
+        return (
+            "出題範囲は G検定シラバス2024 v1.3 全体です。"
+            "特定の章に偏らず、様々な分野から一般レベルの問題を出してください。"
+        )
+    # "A：人工知能とは" のようなラベルから先頭記号とタイトルをそのまま渡す
+    return (
+        f"今回の出題テーマ（シラバスの章）は次の通りです：\n"
+        f"「{theme_label}」\n"
+        f"このテーマに明確に関連する内容だけから、G検定一般レベルの四択問題を1問作成してください。"
+    )
+
+
+def generate_with_gemini(model_name: str, theme_label: str | None) -> dict:
     """
     Gemini で四択問題を JSON 形式で1問生成。
     正常終了なら dict を返し、エラー時は例外を投げる。
@@ -267,12 +298,16 @@ def generate_with_gemini(model_name: str) -> dict:
 
     genai.configure(api_key=api_key)
 
+    theme_prompt = build_theme_prompt(theme_label)
+
     sys_prompt = (
         "あなたはG検定対策の問題作成者です。"
         "四択問題を1問だけ日本語で作成してください。"
         "選択肢はA〜Dの4つで、正答は1つだけ。"
         "各選択肢に1文程度の解説も付けてください。"
-        "内容はG検定一般レベルの、機械学習/ディープラーニング/統計/倫理などから広く選んでください。"
+        "内容はG検定2024対応シラバスの範囲内から出してください。"
+        "\n\n"
+        + theme_prompt
     )
 
     generation_config = {
@@ -328,6 +363,7 @@ def generate_with_gemini(model_name: str) -> dict:
         "choices": data["choices"],
         "correct": data["correct"],
         "explanations": data["explanations"],
+        "theme": theme_label,
     }
     return q
 
@@ -419,7 +455,7 @@ def is_429_error(e: Exception) -> bool:
     return ("429" in s) or ("Resource exhausted" in s) or ("ResourceExhausted" in s)
 
 
-def try_online_with_model_chain(selected_model: str):
+def try_online_with_model_chain(selected_model: str, theme_label: str | None):
     """
     selected_model → 他のモデルの順にオンライン出題を試す。
     成功したら (question_dict, None) を返す。
@@ -445,7 +481,7 @@ def try_online_with_model_chain(selected_model: str):
 
     for m in chain:
         try:
-            q = generate_with_gemini(m)
+            q = generate_with_gemini(m, theme_label)
             register_quota_call("success")
             st.session_state.mode = "online"
             st.session_state.model_name = m
@@ -460,7 +496,7 @@ def try_online_with_model_chain(selected_model: str):
     return None, last_error or "オンライン生成に失敗しました。"
 
 
-def start_online_or_offline(selected_model: str):
+def start_online_or_offline(selected_model: str, theme_label: str | None):
     """
     1問分の出題を開始。
     まずオンラインを試し、ダメならオフラインバンクからランダム出題。
@@ -468,9 +504,10 @@ def start_online_or_offline(selected_model: str):
     st.session_state.result = None
     st.session_state.picked = None
 
-    q, err = try_online_with_model_chain(selected_model)
+    q, err = try_online_with_model_chain(selected_model, theme_label)
     if q:
         st.session_state.question = q
+        st.session_state.theme = theme_label or "全範囲（G検定シラバス全般）"
         return
 
     msg = "Geminiオンライン出題に失敗したため、オフライン問題バンクから出題します。"
@@ -482,6 +519,7 @@ def start_online_or_offline(selected_model: str):
     st.session_state.question = random.choice(bank)
     st.session_state.mode = "offline"
     st.session_state.model_name = None
+    st.session_state.theme = None
 
 
 def grade(picked: str):
@@ -497,6 +535,16 @@ def grade(picked: str):
 # ========= UI =========
 
 st.title("G検定クイズアプリ（Gemini / オフライン対応）")
+
+# 出題テーマ（章）選択
+theme = st.selectbox(
+    "今回の出題テーマ（章）を選んでください",
+    options=SYLLABUS_THEMES,
+    index=SYLLABUS_THEMES.index(st.session_state.theme)
+    if st.session_state.theme in SYLLABUS_THEMES
+    else 0,
+)
+st.session_state.theme = theme
 
 api_key_present = bool(get_gemini_api_key())
 models = []
@@ -518,10 +566,11 @@ selected_model = st.selectbox(
 st.caption(
     "「AIで問題を作る」を押すと、まず選択した Gemini モデルでオンライン出題を試み、"
     "失敗した場合は別モデルを試し、それでもダメならオフライン問題バンクから出題します。"
+    "また、上で選択した『出題テーマ（章）』に基づいて問題を作成します。"
 )
 
 if st.button("AIで問題を作る", type="primary", key="btn_new"):
-    start_online_or_offline(selected_model)
+    start_online_or_offline(selected_model, theme)
     st.rerun()
 
 # 出題表示
@@ -533,6 +582,10 @@ if q:
         st.markdown(f"🛰 **{label}**")
     else:
         st.markdown("📚 **出題元：オフライン（問題バンク）**")
+
+    # テーマラベル
+    if q.get("theme"):
+        st.markdown(f"📘 **出題テーマ：{q['theme']}**")
 
     st.subheader("出題")
     st.write(q["question"])
@@ -579,22 +632,26 @@ if st.session_state.result and st.session_state.question:
         st.write(f"解説：{q['explanations'].get(key, '（解説なし）')}")
 
     if st.button("もう一問出す", key="btn_next"):
-        start_online_or_offline(selected_model)
+        start_online_or_offline(selected_model, st.session_state.theme)
         st.rerun()
 
 # フッタ
 with st.expander("使い方"):
     st.markdown(
-        "1. 上で Gemini モデルを選択（APIキーがある場合のみ有効）\n"
-        "2. **AIで問題を作る** → まずオンライン出題を試み、ダメならオフライン問題バンクへ切替\n"
-        "3. 回答すると、結果と全ての選択肢の解説が表示されます\n"
-        "4. **もう一問出す** で次の問題へ\n\n"
+        "1. 上で『出題テーマ（章）』を選択\n"
+        "2. 必要なら Gemini モデルを選択（APIキーがある場合のみ有効）\n"
+        "3. **AIで問題を作る** → まずオンライン出題を試み、ダメならオフライン問題バンクへ切替\n"
+        "4. 回答すると、結果と全ての選択肢の解説が表示されます\n"
+        "5. **もう一問出す** で次の問題へ\n\n"
         "- オフライン問題は `bank/question_bank.jsonl` から読み込みます。\n"
         "- 使用量メーターは、このアプリからオンライン出題を試みた回数の“目安カウンター”です。"
     )
 
 if st.session_state.mode == "online":
-    st.caption(f"現在：オンライン出題（{st.session_state.model_name or 'Gemini'}）")
+    st.caption(
+        f"現在：オンライン出題（{st.session_state.model_name or 'Gemini'}） / "
+        f"テーマ：{st.session_state.theme}"
+    )
 elif st.session_state.mode == "offline":
     st.caption("現在：オフライン出題（問題バンク）")
 else:
