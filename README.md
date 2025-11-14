@@ -39,23 +39,23 @@ GitHub Actions により、毎日シラバスからの自動問題生成とバ�
 
 ## リポジトリ構成（主要ファイル）
 
-Gtest-Quiz/
-├── app.py
-├── requirements.txt
-├── .streamlit/
-│   └── config.toml
-├── data/
-│   └── JDLA_Gtest_Syllabus_2024_v1.3_JP.pdf
-├── bank/
-│   ├── .gitignore
-│   ├── latest.json
-│   ├── question_bank.jsonl
-│   └── quota_stats.json
-├── tools/
-│   └── auto_refill.py
-└── .github/
-    └── workflows/
-        └── auto_refill.yml
+•	Gtest-Quiz/
+	•	app.py
+	•	requirements.txt
+	•	.streamlit/
+	•	config.toml
+	•	data/
+	•	JDLA_Gtest_Syllabus_2024_v1.3_JP.pdf
+	•	bank/
+	•	.gitignore
+	•	latest.json
+	•	question_bank.jsonl
+	•	quota_stats.json
+	•	tools/
+	•	auto_refill.py
+	•	.github/
+	•	workflows/
+	•	auto_refill.yml
 
 ---
 
