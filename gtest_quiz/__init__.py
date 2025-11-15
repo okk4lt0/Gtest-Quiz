@@ -1,44 +1,22 @@
 """
 gtest_quiz パッケージ
-======================
 
-このパッケージは、G検定対策クイズアプリの内部ロジックを提供する。
+Streamlit 製 G検定クイズアプリの内部モジュールをまとめるパッケージです。
+ここでは副作用のある import は行わず、必要なサブモジュールは
+利用側が明示的に import する方針にしています。
 
-主な役割:
-- 設定管理（config）
-- シラバス構造の読み込み・章管理（syllabus）
-- オフライン問題バンク管理（question_bank）
-- Gemini API モデル管理（models）
-- 推定クォータメーター（quota）
-- 章の偏りを抑える出題制御（meta）
-- UI コンポーネント（ui）
-
-app.py は Streamlit UI のみを担当し、内部ロジックはすべて本パッケージから呼ぶ。
+例:
+    from gtest_quiz.meta import MetaManager
+    from gtest_quiz.question_bank import QuestionBank
+    from gtest_quiz.ui import render_app
 """
 
-from .config import AppConfig
-from .syllabus import Syllabus, load_syllabus_structure
-from .question_bank import QuestionBank
-from .meta import ChapterMetaManager
-from .models import ModelManager
-from .quota import QuotaEstimator
-from .ui import (
-    render_header,
-    render_footer,
-    render_quota_meter,
-    render_question_block,
-)
-
+# パッケージとして公開しているサブモジュール名
 __all__ = [
-    "AppConfig",
-    "Syllabus",
-    "load_syllabus_structure",
-    "QuestionBank",
-    "ChapterMetaManager",
-    "ModelManager",
-    "QuotaEstimator",
-    "render_header",
-    "render_footer",
-    "render_quota_meter",
-    "render_question_block",
+    "meta",
+    "models",
+    "question_bank",
+    "quota",
+    "syllabus",
+    "ui",
 ]
