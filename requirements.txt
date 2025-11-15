@@ -1,4 +1,23 @@
-streamlit
-google-generativeai
-requests
-pypdf
+# Streamlit（UI & Webフレームワーク）
+streamlit>=1.32.0
+
+# Gemini / Google AI API クライアント
+google-generativeai>=0.5.3
+
+# TOML 読み込み
+toml>=0.10.2
+
+# データ処理
+pandas>=2.2.0
+
+# JSONL 取り扱いで使用（オプション）
+ujson>=5.10.0
+
+# PDF（シラバス）読み込みの補助（任意）
+PyPDF2>=3.0.1
+
+# 型チェック（任意。models.py の TypedDict 等があるため）
+typing_extensions>=4.10.0
+
+# GitHub Actions で必要になる可能性がある（Auto-Refill 用）
+requests>=2.31.0
