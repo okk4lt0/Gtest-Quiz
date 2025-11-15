@@ -37,6 +37,20 @@ from gtest_quiz.question_bank import (
 )
 from gtest_quiz.ui import render_quiz_page
 
+# ----------------------------------------------------------------------
+#  Streamlit の rerun 互換ラッパー
+# ----------------------------------------------------------------------
+def rerun() -> None:
+    """
+    Streamlit 1.x 以降では st.rerun、それ以前では st.experimental_rerun。
+    両方に対応するための薄いラッパー。
+    """
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:  # 古いバージョン向け
+        st.experimental_rerun()  # type: ignore[attr-defined]
+
+
 # google-generativeai は存在しない環境でも動くように、遅延インポート + フォールバック
 try:
     import google.generativeai as genai  # type: ignore[import]
@@ -310,7 +324,7 @@ def generate_online_question(
         "id": f"Q_ONLINE_{created_at}",
         "source": "online_runtime",
         "created_at": created_at,
-        "domain": "技術分野",  # 詳細に分けたい場合は infer_domain_and_group を共有しても良い
+        "domain": "技術分野",
         "chapter_group": chapter_group,
         "chapter_id": chapter_label,
         "difficulty": data.get("difficulty", "standard"),
@@ -415,27 +429,27 @@ def render_home_page() -> None:
     with col1:
         if st.button("🚀 クイズを始める", use_container_width=True):
             set_page("quiz")
-            st.experimental_rerun()
+            rerun()
     with col2:
         if st.button("🔁 間違えた問題だけで復習", use_container_width=True):
             set_page("review")
-            st.experimental_rerun()
+            rerun()
 
     st.write("")
     col3, col4 = st.columns(2)
     with col3:
         if st.button("📊 学習統計を見る", use_container_width=True):
             set_page("stats")
-            st.experimental_rerun()
+            rerun()
     with col4:
         if st.button("⚙️ 設定", use_container_width=True):
             set_page("settings")
-            st.experimental_rerun()
+            rerun()
 
     st.write("")
     if st.button("❓ 使い方", use_container_width=True):
         set_page("help")
-        st.experimental_rerun()
+        rerun()
 
 
 # ----------------------------------------------------------------------
@@ -476,7 +490,7 @@ def render_quiz_main_page() -> None:
 
     if ui_result["clicked_next"]:
         load_new_question(session, meta)
-        st.experimental_rerun()
+        rerun()
     elif ui_result["clicked_prev"]:
         if session.history:
             last = session.history[-1]
@@ -487,14 +501,14 @@ def render_quiz_main_page() -> None:
                     source=last.source,
                     model_name=session.model_name,
                 )
-                st.experimental_rerun()
+                rerun()
     elif ui_result["clicked_change_chapter"]:
         load_new_question(session, meta)
-        st.experimental_rerun()
+        rerun()
 
     if st.button("🏠 ホームに戻る", use_container_width=True):
         set_page("home")
-        st.experimental_rerun()
+        rerun()
 
 
 # ----------------------------------------------------------------------
@@ -533,11 +547,11 @@ def render_review_page() -> None:
                     model_name=None,
                 )
                 set_page("quiz")
-                st.experimental_rerun()
+                rerun()
 
     if st.button("🏠 ホームに戻る", use_container_width=True):
         set_page("home")
-        st.experimental_rerun()
+        rerun()
 
 
 # ----------------------------------------------------------------------
@@ -583,7 +597,7 @@ def render_stats_page() -> None:
 
     if st.button("🏠 ホームに戻る", use_container_width=True):
         set_page("home")
-        st.experimental_rerun()
+        rerun()
 
 
 # ----------------------------------------------------------------------
@@ -645,7 +659,7 @@ def render_settings_page() -> None:
 
     if st.button("🏠 ホームに戻る", use_container_width=True):
         set_page("home")
-        st.experimental_rerun()
+        rerun()
 
 
 # ----------------------------------------------------------------------
@@ -677,7 +691,7 @@ def render_help_page() -> None:
 
     if st.button("🏠 ホームに戻る", use_container_width=True):
         set_page("home")
-        st.experimental_rerun()
+        rerun()
 
 
 # ----------------------------------------------------------------------
