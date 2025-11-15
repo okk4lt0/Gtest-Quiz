@@ -1,130 +1,157 @@
 """
 question_bank.py
-======================
+===========================
 
-オフライン問題（JSONL）の読み込みと出題管理。
+JSONL 形式の問題バンクを読み込み、
+検索・抽出・ランダム出題のための関数を提供するモジュール。
 
-要件:
-- JSONL（1行＝1問）形式の安全な読み込み
-- 壊れた行は読み飛ばしつつログに残す（クラッシュ禁止）
-- 章ごとの問題分布を保持し、偏りを抑える
-- chapter_id ベースで検索できる
-- ランダム出題にも対応
+目的:
+- JSONL は巨大化するので、最適化されたロード処理が必要
+- 破損行への耐性（壊れている行は skip）
+- Question モデルとの型整合性
+- 多回ロード時の高速化（ウォームキャッシュ）
 """
 
 from __future__ import annotations
+
 import json
 import random
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Dict, List, Optional, Iterable
+
+from .models import Question
+
+# ----------------------------------------------------------------------
+#  グローバルキャッシュ（Pythonプロセス中は維持される）
+# ----------------------------------------------------------------------
+_QUESTION_CACHE: Dict[str, Question] = {}
+_IS_LOADED = False
+
+# ----------------------------------------------------------------------
+#  パス定義
+# ----------------------------------------------------------------------
+BANK_PATH = Path("bank/question_bank.jsonl")
 
 
-class QuestionBank:
+# ----------------------------------------------------------------------
+#  JSONL 読み込み
+# ----------------------------------------------------------------------
+def load_question_bank(force_reload: bool = False) -> Dict[str, Question]:
     """
-    ローカルの JSONL 問題バンクを管理するクラス。
+    question_bank.jsonl を読み込み、id をキーとする Question 辞書を返す。
+
+    - force_reload=True の場合のみ再読込
+    - 壊れた行は安全にスキップ（print などは行わない）
     """
+    global _IS_LOADED, _QUESTION_CACHE
 
-    def __init__(self, filepath: str):
-        self.filepath = Path(filepath)
-        self.questions: List[Dict[str, Any]] = []
-        self.by_chapter: Dict[str, List[Dict[str, Any]]] = {}
-        self._loaded = False
+    if _IS_LOADED and not force_reload:
+        return _QUESTION_CACHE
 
-    # ----------------------------------------------------------------------
-    # JSONL を読み込む
-    # ----------------------------------------------------------------------
-    def load(self) -> None:
-        """JSONL を読み込む。壊れた行は安全にスキップする。"""
-        if not self.filepath.exists():
-            self.questions = []
-            self.by_chapter = {}
-            self._loaded = True
-            return
+    if not BANK_PATH.exists():
+        raise FileNotFoundError(f"問題バンクが見つかりません: {BANK_PATH}")
 
-        questions = []
-        by_chapter = {}
+    cache: Dict[str, Question] = {}
 
-        with self.filepath.open("r", encoding="utf-8") as f:
-            for line_no, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
+    with BANK_PATH.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
 
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    # 壊れた行はスキップ（クラッシュ防止）
-                    print(f"[WARN] JSON decode error at line {line_no}: {line[:50]}")
-                    continue
+            try:
+                data = json.loads(line)
+                q = Question.from_dict(data)
+                cache[q.id] = q
+            except Exception:
+                # 壊れた行は無視する
+                continue
 
-                # chapter_id が必須
-                chap = obj.get("chapter_id")
-                if not chap:
-                    print(f"[WARN] No chapter_id at line {line_no}")
-                    continue
+    _QUESTION_CACHE = cache
+    _IS_LOADED = True
+    return cache
 
-                questions.append(obj)
 
-                if chap not in by_chapter:
-                    by_chapter[chap] = []
-                by_chapter[chap].append(obj)
+# ----------------------------------------------------------------------
+#  単純ヘルパー
+# ----------------------------------------------------------------------
+def get_all_questions() -> List[Question]:
+    """全問題のリスト"""
+    return list(load_question_bank().values())
 
-        self.questions = questions
-        self.by_chapter = by_chapter
-        self._loaded = True
 
-    # ----------------------------------------------------------------------
-    # 章から問題を 1 題取得
-    # ----------------------------------------------------------------------
-    def pick_by_chapter(self, chapter_id: str) -> Optional[Dict[str, Any]]:
-        """chapter_id の中からランダムに 1 題返す"""
-        if not self._loaded:
-            self.load()
+def get_question_by_id(qid: str) -> Optional[Question]:
+    """id で 1問取得"""
+    return load_question_bank().get(qid)
 
-        if chapter_id not in self.by_chapter:
-            return None
 
-        return random.choice(self.by_chapter[chapter_id])
+def get_questions_by_chapter(chapter_id: str) -> List[Question]:
+    """章（chapter_id）の完全一致でフィルタ"""
+    return [
+        q for q in load_question_bank().values()
+        if q.chapter_id == chapter_id
+    ]
 
-    # ----------------------------------------------------------------------
-    # ランダム出題（全体から）
-    # ----------------------------------------------------------------------
-    def pick_random(self) -> Optional[Dict[str, Any]]:
-        """全問題からランダムに出題"""
-        if not self._loaded:
-            self.load()
 
-        if not self.questions:
-            return None
+def get_questions_by_group(group_name: str) -> List[Question]:
+    """chapter_group でフィルタ（例:「人工知能とは」）"""
+    return [
+        q for q in load_question_bank().values()
+        if q.chapter_group == group_name
+    ]
 
-        return random.choice(self.questions)
 
-    # ----------------------------------------------------------------------
-    # 指定章リストから優先的に一つ返す
-    # meta 偏り制御から呼ばれる
-    # ----------------------------------------------------------------------
-    def pick_from_candidates(self, candidate_chapters: List[str]) -> Optional[Dict[str, Any]]:
-        """
-        meta で決めた候補章リストから問題を取得する。
-        どの章にも問題が無い場合は None。
-        """
-        if not self._loaded:
-            self.load()
+# ----------------------------------------------------------------------
+#  ランダム出題（重みなし）
+# ----------------------------------------------------------------------
+def pick_random_question() -> Question:
+    """
+    単純にランダムで 1問返す。
+    必ず Question を返す。0件なら例外。
+    """
+    bank = get_all_questions()
+    if not bank:
+        raise ValueError("問題バンクが空です。")
+    return random.choice(bank)
 
-        pool = []
-        for chap in candidate_chapters:
-            if chap in self.by_chapter:
-                pool.extend(self.by_chapter[chap])
 
-        if not pool:
-            return None
+# ----------------------------------------------------------------------
+#  ランダム出題（章指定）
+# ----------------------------------------------------------------------
+def pick_random_from_chapter(chapter_id: str) -> Optional[Question]:
+    """
+    章内からランダム出題。0件なら None。
+    """
+    items = get_questions_by_chapter(chapter_id)
+    if not items:
+        return None
+    return random.choice(items)
 
-        return random.choice(pool)
 
-    # ----------------------------------------------------------------------
-    # 問題総数
-    # ----------------------------------------------------------------------
-    def count(self) -> int:
-        if not self._loaded:
-            self.load()
-        return len(self.questions)
+# ----------------------------------------------------------------------
+#  検索：全文検索（最低限）
+# ----------------------------------------------------------------------
+def search(keyword: str) -> List[Question]:
+    """
+    問題文・選択肢・章名を対象とする簡易全文検索。
+
+    ※高速検索が必要なら将来 FAISS/SQlite/Elasticsearch を検討。
+    """
+    keyword = keyword.strip()
+    if not keyword:
+        return []
+
+    keyword_lower = keyword.lower()
+
+    results = []
+    for q in load_question_bank().values():
+        t = (
+            q.question.lower(),
+            " ".join(q.choices).lower(),
+            q.chapter_group.lower(),
+            q.chapter_id.lower(),
+        )
+        if any(keyword_lower in part for part in t):
+            results.append(q)
+
+    return results
