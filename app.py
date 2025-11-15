@@ -351,12 +351,11 @@ def load_new_question(session: SessionState, meta: MetaManager) -> None:
 
     chapter_id = meta.choose_next_chapter(available_chapter_ids=available_chapters)
     if chapter_id is None:
-        # フォールバックとしてランダム章
+        # フォールバックとして先頭の章を使用
         chapter_id = list(available_chapters)[0]
 
     mode = session.mode
 
-    # オンラインを試す条件か？
     def try_online() -> Optional[Question]:
         return generate_online_question(meta, chapter_label=chapter_id)
 
@@ -387,7 +386,6 @@ def load_new_question(session: SessionState, meta: MetaManager) -> None:
         st.error("新しい問題を取得できませんでした。")
         return
 
-    # SessionState にセット
     session.start_new_question(
         question=question,
         source="online" if source == "online" else "offline",
@@ -447,15 +445,12 @@ def render_quiz_main_page() -> None:
     session = get_session_state()
     meta = get_meta_manager()
 
-    # 問題が無ければ新規ロード
     if not isinstance(session.current_question, Question):
         load_new_question(session, meta)
 
     quota_status = meta.get_quota_status()
-    # 進捗バーは現時点では未実装（None で非表示）
-    progress_ratio = None
+    progress_ratio = None  # 現状は未実装
 
-    # モード表示
     mode_label = session.mode.upper()
 
     ui_result = render_quiz_page(
@@ -465,15 +460,13 @@ def render_quiz_main_page() -> None:
         mode_label=mode_label,
     )
 
-    # 新たに選択された場合のみ answer
     if ui_result["selected_choice"] is not None:
         idx = ui_result["selected_choice"]
         correct = session.answer(idx)
-        # meta の usage 更新
         if session.current_question is not None:
             meta.record_usage(
                 chapter_id=session.current_question.chapter_id,
-                source=session.source,  # "online" / "offline"
+                source=session.source,
             )
             meta.save()
         if correct:
@@ -481,12 +474,10 @@ def render_quiz_main_page() -> None:
         else:
             st.warning("不正解です。解説を確認しましょう。")
 
-    # ナビゲーション
     if ui_result["clicked_next"]:
         load_new_question(session, meta)
         st.experimental_rerun()
     elif ui_result["clicked_prev"]:
-        # 履歴の最後の問題を再出題（解答状態はリセットして再挑戦）
         if session.history:
             last = session.history[-1]
             prev_q = get_question_by_id(last.question_id)
@@ -498,12 +489,9 @@ def render_quiz_main_page() -> None:
                 )
                 st.experimental_rerun()
     elif ui_result["clicked_change_chapter"]:
-        # last_chapter_id が更新されているので、choose_next_chapter が
-        # 違う章を優先してくれる
         load_new_question(session, meta)
         st.experimental_rerun()
 
-    # ホームに戻るリンク
     if st.button("🏠 ホームに戻る", use_container_width=True):
         set_page("home")
         st.experimental_rerun()
@@ -514,7 +502,7 @@ def render_quiz_main_page() -> None:
 # ----------------------------------------------------------------------
 def render_review_page() -> None:
     session = get_session_state()
-    meta = get_meta_manager()
+    meta = get_meta_manager()  # noqa: F841 （今後拡張用に保持）
 
     st.markdown("## 🔁 間違えた問題だけで復習")
 
@@ -523,28 +511,27 @@ def render_review_page() -> None:
         st.info("まだ間違えた問題の記録がありません。クイズを解いてから利用してください。")
     else:
         st.write(f"これまでに **{len(wrongs)} 問** 間違えています。")
-        # 直近 10 件を表示
         rows = []
         for r in reversed(wrongs[-10:]):
             q = get_question_by_id(r.question_id)
             if q is None:
                 continue
-            rows.append(
-                f"- [{q.chapter_id}] {q.question[:40]}..."
-            )
+            rows.append(f"- [{q.chapter_id}] {q.question[:40]}...")
         if rows:
             st.markdown("\n".join(rows))
 
         st.write("---")
         if st.button("ランダムに 1 問復習する", use_container_width=True):
-            # 間違えた問題の中からランダムに 1問再出題
             import random
 
             r = random.choice(wrongs)
             q = get_question_by_id(r.question_id)
             if q is not None:
-                # 復習も通常のクイズ画面で出す（オフライン扱いとする）
-                session.start_new_question(question=q, source="offline", model_name=None)
+                session.start_new_question(
+                    question=q,
+                    source="offline",
+                    model_name=None,
+                )
                 set_page("quiz")
                 st.experimental_rerun()
 
@@ -557,6 +544,8 @@ def render_review_page() -> None:
 #  ページ: 学習統計
 # ----------------------------------------------------------------------
 def render_stats_page() -> None:
+    import pandas as pd
+
     meta = get_meta_manager()
     st.markdown("## 📊 学習統計")
 
@@ -576,8 +565,6 @@ def render_stats_page() -> None:
     if not isinstance(chapter_stats, dict) or not chapter_stats:
         st.info("まだ章ごとの出題統計はありません。")
     else:
-        import pandas as pd
-
         rows = []
         for chap, stat in chapter_stats.items():
             if not isinstance(stat, dict):
@@ -610,7 +597,11 @@ def render_settings_page() -> None:
 
     st.markdown("### 出題モード")
 
-    mode_map = {"auto": "自動 (オンライン優先+フォールバック)", "online": "オンライン優先", "offline": "オフラインのみ"}
+    mode_map = {
+        "auto": "自動 (オンライン優先+フォールバック)",
+        "online": "オンライン優先",
+        "offline": "オフラインのみ",
+    }
     modes = list(mode_map.keys())
     labels = [mode_map[m] for m in modes]
 
@@ -694,16 +685,14 @@ def render_help_page() -> None:
 # ----------------------------------------------------------------------
 def main() -> None:
     st.set_page_config(
-        page_title="Gtest-Quiz",
+        page_title="G検定問題集",
         page_icon="🧠",
         layout="centered",
     )
 
-    # コンフィグ & Gemini 初期化
     load_app_config()
     init_gemini_if_needed()
 
-    # ページ選択
     page = get_page()
 
     if page == "quiz":
@@ -717,7 +706,6 @@ def main() -> None:
     elif page == "help":
         render_help_page()
     else:
-        # デフォルトはホーム
         set_page("home")
         render_home_page()
 
